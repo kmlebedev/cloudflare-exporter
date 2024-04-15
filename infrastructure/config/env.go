@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -21,6 +22,8 @@ type Cloudflare struct {
 	APIKey    string
 	APIEmail  string
 	AccountID string
+
+	ScrapeDelay int
 }
 
 func Get() (Environment, error) {
@@ -60,6 +63,11 @@ func Get() (Environment, error) {
 	}
 	if env.Cloudflare.APIToken != "" && (env.Cloudflare.APIKey != "" || env.Cloudflare.APIEmail != "") {
 		return env, fmt.Errorf("Cloudflare API token cannot be used with API key and email address")
+	}
+
+	env.Cloudflare.ScrapeDelay = 300
+	if scrapeDelay, ok := os.LookupEnv("CF_SCRAPE_DELAY"); ok {
+		env.Cloudflare.ScrapeDelay, _ = strconv.Atoi(scrapeDelay)
 	}
 
 	return env, nil

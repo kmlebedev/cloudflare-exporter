@@ -3,6 +3,7 @@ package cloudflare
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/chitoku-k/cloudflare-exporter/service"
 	cf "github.com/cloudflare/cloudflare-go"
@@ -20,7 +21,7 @@ func NewLoadBalancerService(client *cf.API, accountId *cf.ResourceContainer) ser
 	}
 }
 
-func (s *loadBalancerService) Collect(ctx context.Context, poolName string) ([]service.Pool, error) {
+func (s *loadBalancerService) Collect(ctx context.Context, poolNames []string) ([]service.Pool, error) {
 	pools, err := s.Client.ListLoadBalancerPools(ctx, s.AccountId, cf.ListLoadBalancerPoolParams{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pools: %w", err)
@@ -28,7 +29,7 @@ func (s *loadBalancerService) Collect(ctx context.Context, poolName string) ([]s
 
 	var result []service.Pool
 	for _, p := range pools {
-		if p.Name != poolName {
+		if !slices.Contains(poolNames, p.Name) {
 			continue
 		}
 

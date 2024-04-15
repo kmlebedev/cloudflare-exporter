@@ -4,22 +4,30 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"github.com/Khan/genqlient/graphql"
+	"github.com/chitoku-k/cloudflare-exporter/infrastructure/analytics"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/chitoku-k/cloudflare-exporter/service"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 )
 
 type engine struct {
+	Client       graphql.Client
+	LoadBalancer service.LoadBalancer
+	ZoneIds      map[string]string
+	ScrapeDelay  int
 	Port         string
 	CertFile     string
 	KeyFile      string
-	LoadBalancer service.LoadBalancer
 }
 
 type Engine interface {
@@ -31,15 +39,30 @@ func NewEngine(
 	certFile string,
 	keyFile string,
 	loadBalancer service.LoadBalancer,
+	zoneIds map[string]string,
+	client graphql.Client,
+	scrapeDelay int,
 ) Engine {
 	return &engine{
 		Port:         port,
 		CertFile:     certFile,
 		KeyFile:      keyFile,
 		LoadBalancer: loadBalancer,
+		ZoneIds:      zoneIds,
+		Client:       client,
+		ScrapeDelay:  scrapeDelay,
 	}
 }
 
+func (e *engine) findZoneName(id string) string {
+	for zoneName, zoneId := range e.ZoneIds {
+		if zoneId == id {
+			return zoneName
+		}
+	}
+
+	return ""
+}
 func (e *engine) Start(ctx context.Context) error {
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -65,13 +88,36 @@ func (e *engine) Start(ctx context.Context) error {
 			Help:      "RTT to the pool origin",
 		}, []string{"pool_name", "health_region", "origin_address", "code"})
 
-		target, ok := c.GetQuery("target")
-		if !ok {
+		poolReq := prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "cloudflare",
+			Name:      "pool_requests_total",
+			Help:      "Requests per pool",
+		}, []string{"zone", "load_balancer_name", "pool_name", "origin_name"})
+
+		zoneReq := prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "cloudflare",
+			Name:      "zone_requests_status_country_host",
+			Help:      "Count of not cached requests for zone per origin HTTP status per country per host",
+		}, []string{"zone", "status", "country", "host", "cache"})
+
+		now := time.Now().Add(-time.Duration(e.ScrapeDelay*100) * time.Second).Truncate(60 * time.Second).UTC()
+		now1mAgo := now.Add(-60 * time.Second)
+
+		defer func() {
+			registry := prometheus.NewRegistry()
+			registry.MustRegister(health, rtt, poolReq, zoneReq)
+			handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+			handler.ServeHTTP(c.Writer, c.Request)
+		}()
+		pool, okP := c.GetQuery("pool")
+		target, okT := c.GetQuery("target")
+		queryZone, okZ := c.GetQuery("zone")
+		if !okP || !okT || !okZ {
 			c.Status(http.StatusBadRequest)
 			return
 		}
-
-		pools, err := e.LoadBalancer.Collect(c, target)
+		poolNames := strings.Split(pool, ",")
+		pools, err := e.LoadBalancer.Collect(c, poolNames)
 		if err != nil {
 			slog.Error("Error in Cloudflare", "err", err)
 			c.Status(http.StatusInternalServerError)
@@ -97,12 +143,38 @@ func (e *engine) Start(ctx context.Context) error {
 				}
 			}
 		}
-
-		registry := prometheus.NewRegistry()
-		registry.MustRegister(health, rtt)
-
-		handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
-		handler.ServeHTTP(c.Writer, c.Request)
+		zoneIDs := []string{}
+		for _, zone := range strings.Split(queryZone, ",") {
+			if zoneId, ok := e.ZoneIds[zone]; ok {
+				zoneIDs = append(zoneIDs, zoneId)
+			}
+		}
+		if len(zoneIDs) == 0 {
+			return
+		}
+		hosts := strings.Split(target, ",")
+		if resp, err := analytics.FetchZoneTotals(c, e.Client, zoneIDs, poolNames, hosts, now1mAgo, now, 1000); err == nil {
+			for _, zone := range resp.Viewer.GetZones() {
+				for _, g := range zone.LoadBalancingRequestsAdaptiveGroups {
+					poolReq.WithLabelValues(
+						e.findZoneName(zone.ZoneTag),
+						g.Dimensions.LbName,
+						g.Dimensions.SelectedPoolName,
+						g.Dimensions.SelectedOriginName,
+					).Add(float64(g.Count))
+				}
+				for _, g := range zone.HttpRequestsAdaptiveGroups {
+					zoneReq.WithLabelValues(
+						e.findZoneName(zone.ZoneTag),
+						strconv.Itoa(int(g.Dimensions.EdgeResponseStatus)),
+						g.Dimensions.ClientCountryName,
+						g.Dimensions.ClientRequestHTTPHost,
+						g.Dimensions.CacheStatus,
+					).Add(float64(g.Count))
+				}
+			}
+			slog.Info("FetchZoneTotals zoneIDs: ", zoneIDs, "e.ZoneIds", e.ZoneIds, "resp", resp)
+		}
 	})
 
 	server := http.Server{

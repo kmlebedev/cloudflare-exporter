@@ -1,0 +1,33 @@
+query FetchZoneTotals($zoneIDs: [string!], $pools: [string!], $hosts: [string!], $mintime: Time!, $maxtime: Time!, $limit: uint64!) {
+    viewer {
+        zones(filter: { zoneTag_in: $zoneIDs }) {
+            zoneTag
+            httpRequestsAdaptiveGroups(
+                filter: {clientRequestHTTPHost_in: $hosts, datetime_geq: $mintime, datetime_lt: $maxtime},
+                limit: $limit) {
+                count
+                dimensions {
+                    cacheStatus
+                    edgeResponseStatus
+                    clientCountryName
+                    clientRequestHTTPHost
+                }
+            }
+            loadBalancingRequestsAdaptiveGroups(
+                filter: { selectedPoolName_in: $pools, datetime_geq: $mintime, datetime_lt: $maxtime},
+                limit: $limit) {
+                count
+                dimensions {
+                    region
+                    lbName
+                    selectedPoolName
+                    proxied
+                    selectedOriginName
+                    selectedPoolAvgRttMs
+                    selectedPoolHealthy
+                    steeringPolicy
+                }
+            }
+        }
+    }
+}

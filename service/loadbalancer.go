@@ -6,7 +6,7 @@ import (
 )
 
 type LoadBalancer interface {
-	Collect(ctx context.Context, poolName string) ([]Pool, error)
+	Collect(ctx context.Context, poolNames []string) ([]Pool, error)
 }
 
 type Pool struct {
