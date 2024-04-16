@@ -1,0 +1,56 @@
+---
+stages:
+  - pre_tagging
+  - tagging
+  - release
+
+variables:
+  TAG_OF_GITLAB_RUNNER: inf_hotel_okd
+
+release_tag:
+  stage: pre_tagging
+  image: registry.stripchat.dev/infrastructure/ansible/standard_version:latest
+  tags:
+    - ${TAG_OF_GITLAB_RUNNER}
+  script:
+    - |
+      STANDARD_VERSION_ADDTIONAL=""
+      if [ ! -f "CHANGELOG.md" ]; then
+        STANDARD_VERSION_ADDTIONAL="--first-release"
+      fi
+      CI_RELEASE_TAG=$(standard-version ${STANDARD_VERSION_ADDTIONAL} --dry-run | grep -Eo "tagging release (v.*)" | grep -Eo "(v.*)")
+    - echo "CI_RELEASE_TAG=${RELEASE_TAG_PREFIX}${CI_RELEASE_TAG}" > release_tag.env
+  variables: {}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE =~ /(schedule|trigger|web)/'
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  artifacts:
+    reports:
+      dotenv: release_tag.env
+
+build:
+  stage: tagging
+  dependencies:
+    - release_tag
+  tags:
+    - ${TAG_OF_GITLAB_RUNNER}
+  image: nexus.stripchat.tech/golang:1.22
+  script:
+    - GODEBUG=http2client=0 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags "-s -w -extldflags -static"
+    - ASSET_NAME=${CI_PROJECT_NAME}-linux-amd64.tar.gz
+    - tar -czvf $ASSET_NAME ${CI_PROJECT_NAME}
+    - curl -s -u admin:${NEXUS_ADMIN_PASS} --upload-file $ASSET_NAME ${NEXUS_URL}/${CI_RELEASE_TAG}/$ASSET_NAME
+    - curl -sv -I ${NEXUS_URL}/${CI_RELEASE_TAG}/$ASSET_NAME
+  variables:
+    NEXUS_URL: "https://nexus.stripchat.tech/repository/storage/${CI_PROJECT_NAME}"
+    CI_RELEASE_TAG: ${CI_COMMIT_SHA}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE =~ /(schedule|trigger|web)/'
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+include:
+  - project: "infrastructure/gitlab/templates"
+    ref: master
+    file: "jobs/release.yml"
